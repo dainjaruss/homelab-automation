@@ -1,0 +1,48 @@
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+n8n/.env
+
+# n8n data and config
+n8n/data/
+n8n/database.sqlite
+n8n/config.json
+n8n/.n8n/
+
+# Log files
+*.log
+
+# Docker
+docker-compose.override.yml
+*.dockerignore
+
+# Scripts temp files
+scripts/*.tmp
+scripts/*.bak
+scripts/__pycache__/
+scripts/*.pyc
+
+# Workflows temp
+workflows/*.tmp
+workflows/backups/
+
+# Temp files
+*.tmp
+*.temp
+temp/
+tmp/
+.cache/
+
+# abacus temp (if relevant)
+abacus.donotdelete
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
