@@ -1,0 +1,231 @@
+{
+  "name": "Container Health Check",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/5 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "26aacde0-619a-41df-8c9e-b216e6e9c10f",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -864,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "privateKey",
+        "command": "#!/usr/bin/env bash\nset -euo pipefail\n\n# (Optional hardening for cron)\nexport PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\nPUSH_BASE=\"http://192.168.1.142:3001/api/push/hM6oDQYkfH\"\n\n# containers expected on main host\ncontainers=(plex sonarr radarr overseerr tautulli)\n\nbad=0\nmsg=\"\"\ndetails=\"\"\n\nfor c in \"${containers[@]}\"; do\n  if ! docker inspect -f '{{.State.Status}}' \"$c\" >/dev/null 2>&1; then\n    bad=1\n    msg+=\"$c:missing \"\n    details+=\"$c:missing \"\n    continue\n  fi\n\n  st=\"$(docker inspect -f '{{.State.Status}}' \"$c\")\"\n  details+=\"$c:$st \"\n  if [[ \"$st\" != \"running\" ]]; then\n    bad=1\n    msg+=\"$c:$st \"\n  fi\n\n  # If container has a healthcheck, also enforce it\n  health=\"$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \"$c\")\"\n  if [[ \"$health\" != \"none\" && \"$health\" != \"healthy\" ]]; then\n    bad=1\n    msg+=\"$c:health=$health \"\n    details+=\" (health:$health)\"\n  fi\ndone\n\n# Trim trailing spaces\ndetails=\"${details% }\"\nmsg=\"${msg% }\"\n\nif [[ \"$bad\" -eq 0 ]]; then\n  echo \"STATUS:OK\"\n  echo \"MESSAGE:All containers running\"\n  echo \"DETAILS:$details\"\n  curl -fsS -m 10 --retry 3 -G \\\n    --data-urlencode \"status=up\" \\\n    --data-urlencode \"msg=Containers OK\" \\\n    \"$PUSH_BASE\" >/dev/null\nelse\n  echo \"STATUS:FAIL\"\n  echo \"MESSAGE:$msg\"\n  echo \"DETAILS:$details\"\n  fail_msg=\"Containers BAD: ${msg}\"\n  curl -fsS -m 10 --retry 3 -G \\\n    --data-urlencode \"status=down\" \\\n    --data-urlencode \"msg=$fail_msg\" \\\n    \"$PUSH_BASE\" >/dev/null || true\nfi"
+      },
+      "id": "9551ccf6-81bb-45d0-8657-598468863c00",
+      "name": "SSH: Check Containers",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        -112
+      ],
+      "credentials": {
+        "sshPrivateKey": {
+          "id": "8Ct7KD05bVDLLpnI",
+          "name": "SSH Private Key account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the SSH output with better error handling\nconst output = $input.item.json.stdout || '';\nconst lines = output.split('\\n').filter(l => l.trim());\n\nlet status = 'OK';  // Default to OK to avoid false alerts on empty output\nlet message = 'All containers running';\nlet details = 'Script executed successfully';\n\nif (output.trim() === '') {\n  // Empty output - assume healthy but log warning\n  message = 'No output from script (possible SSH issue)';\n  details = 'Check SSH connection';\n} else {\n  // Parse lines\n  for (const line of lines) {\n    if (line.startsWith('STATUS:')) {\n      status = line.split(':')[1].trim();\n    } else if (line.startsWith('MESSAGE:')) {\n      message = line.substring(8).trim();\n    } else if (line.startsWith('DETAILS:')) {\n      details = line.substring(8).trim();\n    }\n  }\n}\n\nconst isHealthy = status === 'OK' || output.trim() === '';  // Treat empty as healthy (no alert)\nconst uptimeKumaStatus = isHealthy ? 'up' : 'down';\nconst uptimeKumaMsg = isHealthy ? 'Containers OK' : `Containers BAD: ${message}`;\n\nreturn {\n  status: status,\n  isHealthy: isHealthy,\n  message: message,\n  details: details,\n  uptimeKumaStatus: uptimeKumaStatus,\n  uptimeKumaMsg: uptimeKumaMsg,\n  timestamp: new Date().toISOString()\n};"
+      },
+      "id": "cd82fde8-1d56-47eb-8015-0c24832deb13",
+      "name": "Parse Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -416,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "18312b32-d9e3-4828-b67c-c1e832d81999",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "OK",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b014dc73-f6e5-4f0b-b464-3a9a6519f91e",
+      "name": "If Unhealthy",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        32,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "7787445571",
+        "text": "=⚠️ *Container Health Alert*\n\n*Status:* {{ $json.status }}\n*Issue:* {{ $json.message }}\n\n*Details:* {{ $json.details }}\n\n*Time:* {{ $json.timestamp }}\n*Server:* ollivanders.home (192.168.1.142)",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "656a5de4-9521-43d8-81c2-b90458f2ae7c",
+      "name": "Telegram Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        272,
+        -64
+      ],
+      "webhookId": "5637110c-3bc1-4058-9f2c-def8a497cb2b",
+      "credentials": {
+        "telegramApi": {
+          "id": "VAPBpHoQv9dvxzNh",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "62f6e499-42fb-4bec-b79f-9d3de50dd980",
+      "name": "No Action (Healthy)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        272,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://192.168.1.142:3001/api/push/hM6oDQYkfH",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "status",
+              "value": "={{ $json.uptimeKumaStatus }}"
+            },
+            {
+              "name": "msg",
+              "value": "={{ $json.uptimeKumaMsg }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "194f51ec-830c-4832-a548-310ee5675c53",
+      "name": "Uptime Kuma Push",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        -176,
+        -240
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "SSH: Check Containers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SSH: Check Containers": {
+      "main": [
+        [
+          {
+            "node": "Parse Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Results": {
+      "main": [
+        [
+          {
+            "node": "If Unhealthy",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Uptime Kuma Push",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Unhealthy": {
+      "main": [
+        [
+          {
+            "node": "No Action (Healthy)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Uptime Kuma Push": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "3cbce21f-cf52-4d8b-8edc-e342b4cca301",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "2a5d8318ed3d9d46a0f0f04e4e6f6e3603ee70a242bfe7c0ee98bc8ee53c5109"
+  },
+  "id": "7xy5gK1LVuTic30H",
+  "tags": []
+}
