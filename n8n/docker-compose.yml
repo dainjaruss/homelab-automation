@@ -64,6 +64,7 @@ services:
       - n8n_data:/home/node/.n8n
       - /var/run/docker.sock:/var/run/docker.sock:ro  # Optional: for Docker operations
       - /home/dainja/.ssh/id_ed25519:/home/node/.ssh/id_ed25519:ro        # Added to troubleshoot ssh
+      - /mnt/server/homelab-automation:/home/homelab-automation:ro        # Added to load scripts into n8n workflows
     networks:
       - n8n-network
     depends_on:

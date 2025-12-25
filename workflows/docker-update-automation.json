@@ -1,0 +1,260 @@
+{
+  "name": "Docker Image Update Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * 0"
+            }
+          ]
+        }
+      },
+      "id": "docker-update-schedule-trigger",
+      "name": "Weekly Sunday 2 AM Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "notes": "Triggers every Sunday at 2 AM (0 2 * * 0)"
+    },
+    {
+      "parameters": {
+        "authentication": "password",
+        "command": "=/mnt/server/homelab-automation/scripts/docker_update_improved.sh",
+        "options": {}
+      },
+      "id": "execute-docker-update-script",
+      "name": "Execute Docker Update Script",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        460,
+        300
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH ollivanders.home"
+        }
+      },
+      "notes": "Execute the improved docker update script via SSH"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse docker update script output\nconst scriptOutput = $input.item.json.stderr || '';\nconst scriptStdout = $input.item.json.stdout || '';\nconst exitCode = $input.item.json.exitCode;\n\n// Initialize default values\nlet status = 'FAILURE';\nlet updatedCount = 0;\nlet failedCount = 0;\nlet duration = 'Unknown';\nlet warningCount = 0;\nlet failedServices = '';\n\n// Parse the script output for status information\n// The script outputs lines like: STATUS=SUCCESS, UPDATED=9, FAILED=0, etc.\nconst outputLines = scriptStdout.split('\\n');\n\nfor (const line of outputLines) {\n  const trimmedLine = line.trim();\n  \n  if (trimmedLine.startsWith('STATUS=')) {\n    status = trimmedLine.split('=')[1];\n  } else if (trimmedLine.startsWith('UPDATED=')) {\n    updatedCount = parseInt(trimmedLine.split('=')[1]) || 0;\n  } else if (trimmedLine.startsWith('FAILED=')) {\n    failedCount = parseInt(trimmedLine.split('=')[1]) || 0;\n  } else if (trimmedLine.startsWith('DURATION=')) {\n    duration = trimmedLine.split('=')[1];\n  } else if (trimmedLine.startsWith('WARNINGS=')) {\n    warningCount = parseInt(trimmedLine.split('=')[1]) || 0;\n  } else if (trimmedLine.startsWith('FAILED_SERVICES=')) {\n    failedServices = trimmedLine.substring('FAILED_SERVICES='.length);\n  }\n}\n\n// Defensive: If we couldn't parse status, use exit code\nif (!status || (status !== 'SUCCESS' && status !== 'FAILURE')) {\n  status = exitCode === 0 ? 'SUCCESS' : 'FAILURE';\n}\n\n// Extract last 30 lines of stderr for error details\nconst stderrLines = scriptOutput.split('\\n');\nconst recentOutput = stderrLines.slice(-30).join('\\n');\n\nconst summary = {\n  exitCode: exitCode,\n  success: status === 'SUCCESS',\n  status: status,\n  updatedCount: updatedCount,\n  failedCount: failedCount,\n  duration: duration,\n  warningCount: warningCount,\n  failedServices: failedServices,\n  fullOutput: scriptOutput,\n  recentOutput: recentOutput,\n  stdout: scriptStdout,\n  timestamp: new Date().toISOString(),\n  uptimeKumaStatus: status === 'SUCCESS' ? 'up' : 'down',\n  uptimeKumaMsg: status === 'SUCCESS' \n    ? `Docker Update OK - ${updatedCount} services updated` \n    : `Docker Update FAILED - ${failedCount} services failed`\n};\n\nreturn { json: summary };"
+      },
+      "id": "parse-docker-update-output",
+      "name": "Parse Docker Update Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ],
+      "notes": "Extract update statistics and prepare data for both notification branches (defensive parsing)"
+    },
+    {
+      "parameters": {
+        "url": "=http://192.168.1.142:3001/api/push/is26MWqum3",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "status",
+                "value": "={{ $json.uptimeKumaStatus }}"
+              },
+              {
+                "name": "msg",
+                "value": "={{ $json.uptimeKumaMsg }}"
+              }
+            ]
+          },
+          "timeout": 10000,
+          "retry": {
+            "maxTries": 3,
+            "waitBetweenTries": 1000
+          }
+        }
+      },
+      "id": "uptime-kuma-push-docker",
+      "name": "Uptime Kuma Push",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        180
+      ],
+      "notes": "PARALLEL BRANCH: Always notify Uptime Kuma of update status (does not interfere with Telegram logic)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "docker-update-success-condition",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "SUCCESS",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-docker-update-for-telegram",
+      "name": "Check Update Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        420
+      ],
+      "notes": "PARALLEL BRANCH: Check status to determine which Telegram notification to send"
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "={{ $vars.TELEGRAM_CHAT_ID }}",
+        "text": "=✅ *Docker Image Update - SUCCESS*\n\n📅 Date: {{ $json.timestamp.split('T')[0] }}\n⏱️ Duration: {{ $json.duration }}\n✅ Updated: {{ $json.updatedCount }} services\n{{ $json.warningCount > 0 ? '⚠️ Warnings: ' + $json.warningCount : '✓ No warnings' }}\n\n*Services Updated:*\n*Local (9):*\n• plex, sonarr, radarr, overseerr, tautulli\n• heimdall\n• uptime-kuma\n• scrypted\n• frigate\n\n*Remote (2):*\n• sabnzbd @ 192.168.4.99\n• nginx-proxy-manager @ 192.168.1.236\n\n✓ All containers health checked\n✓ Images updated to latest versions\n📋 Logs: /mnt/server/logs/docker_update_improved.log",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-docker-success",
+      "name": "Telegram - Success",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        340
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "2",
+          "name": "Telegram Bot"
+        }
+      },
+      "notes": "Send success notification only when all updates succeed"
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "={{ $vars.TELEGRAM_CHAT_ID }}",
+        "text": "=⚠️ *Docker Image Update - FAILED*\n\n📅 Date: {{ $json.timestamp.split('T')[0] }}\n⏱️ Duration: {{ $json.duration }}\n❌ Failed: {{ $json.failedCount }} services\n✅ Updated: {{ $json.updatedCount }} services\n{{ $json.warningCount > 0 ? '⚠️ Warnings: ' + $json.warningCount : '' }}\n\n{{ $json.failedServices ? '*Failed Services:*\\n' + $json.failedServices.split(' ').map(s => '• ' + s).join('\\n') + '\\n\\n' : '' }}*Recent Log Output:*\n```\n{{ $json.recentOutput }}\n```\n\n⚠️ *Action Required:*\n• Check failed services manually\n• Review rollback status in logs\n• Verify container health\n\n📋 Full logs: /mnt/server/logs/docker_update_improved.log",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-docker-failure",
+      "name": "Telegram - Failure",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        500
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "2",
+          "name": "Telegram Bot"
+        }
+      },
+      "notes": "Send failure notification with details about which services failed and rollback status"
+    }
+  ],
+  "connections": {
+    "Weekly Sunday 2 AM Schedule": {
+      "main": [
+        [
+          {
+            "node": "Execute Docker Update Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Docker Update Script": {
+      "main": [
+        [
+          {
+            "node": "Parse Docker Update Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Docker Update Output": {
+      "main": [
+        [
+          {
+            "node": "Uptime Kuma Push",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Update Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Update Status": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Uptime Kuma Push": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2025-12-24T00:00:00.000Z",
+      "updatedAt": "2025-12-24T00:00:00.000Z",
+      "id": "docker-update-automation",
+      "name": "docker-updates"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-12-24T00:00:00.000Z",
+  "versionId": "1"
+}

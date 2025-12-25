@@ -1,0 +1,256 @@
+{
+  "name": "Media Stack Backup Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 */3 * *"
+            }
+          ]
+        }
+      },
+      "id": "backup-schedule-trigger",
+      "name": "Every 3 Days Backup Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "notes": "Triggers every 3 days at midnight (0 0 */3 * *)"
+    },
+    {
+      "parameters": {
+        "authentication": "password",
+        "command": "=/home/ubuntu/homelab-automation/scripts/backup_media_stack_improved.sh",
+        "options": {}
+      },
+      "id": "execute-backup-script",
+      "name": "Execute Backup Script",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        460,
+        300
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH ollivanders.home"
+        }
+      },
+      "notes": "Execute the improved backup script via SSH"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse backup script output for summary statistics\nconst scriptOutput = $input.item.json.stderr || '';\nconst scriptStdout = $input.item.json.stdout || '';\nconst exitCode = $input.item.json.exitCode;\n\n// Extract key information using regex\nconst durationMatch = scriptOutput.match(/Duration: (\\d+) seconds/);\nconst sizeMatch = scriptOutput.match(/Total backup size: (.+)/);\nconst dateMatch = scriptOutput.match(/Date: ([\\d-]+)/);\n\nconst summary = {\n  exitCode: exitCode,\n  success: exitCode === 0,\n  status: exitCode === 0 ? 'SUCCESS' : 'FAILURE',\n  duration: durationMatch ? durationMatch[1] + ' seconds' : 'Unknown',\n  backupSize: sizeMatch ? sizeMatch[1] : 'Unknown',\n  backupDate: dateMatch ? dateMatch[1] : new Date().toISOString().split('T')[0],\n  fullOutput: scriptOutput,\n  stdout: scriptStdout,\n  timestamp: new Date().toISOString(),\n  uptimeKumaStatus: exitCode === 0 ? 'up' : 'down',\n  uptimeKumaMsg: exitCode === 0 ? 'Backup completed successfully' : `Backup FAILED - Exit code: ${exitCode}`\n};\n\nreturn { json: summary };"
+      },
+      "id": "parse-backup-output",
+      "name": "Parse Backup Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ],
+      "notes": "Extract statistics and prepare data for both notification branches"
+    },
+    {
+      "parameters": {
+        "url": "=http://192.168.1.142:3001/api/push/6egmEoFola",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "status",
+                "value": "={{ $json.uptimeKumaStatus }}"
+              },
+              {
+                "name": "msg",
+                "value": "={{ $json.uptimeKumaMsg }}"
+              }
+            ]
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "uptime-kuma-push",
+      "name": "Uptime Kuma Push",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        180
+      ],
+      "notes": "PARALLEL BRANCH: Always notify Uptime Kuma of backup status (does not interfere with Telegram logic)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "backup-success-condition",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "SUCCESS",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-backup-for-telegram",
+      "name": "Check Backup Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        420
+      ],
+      "notes": "PARALLEL BRANCH: Check status to determine which Telegram notification to send"
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "={{ $vars.TELEGRAM_CHAT_ID }}",
+        "text": "=✅ *Media Stack Backup - SUCCESS*\n\n📅 Date: {{ $json.timestamp.split('T')[0] }}\n⏱️ Duration: {{ $json.duration }}\n💾 Backup Size: {{ $json.backupSize }}\n📁 Location: /mnt/server/backup/media-stack/\n\n*Services Backed Up (11 total):*\n*Local (9):*\n• Plex (hot backup)\n• Sonarr\n• Radarr\n• Overseerr\n• Tautulli\n• Heimdall\n• Scrypted\n• Uptime Kuma\n• Frigate\n\n*Remote (2):*\n• Sabnzbd (192.168.4.99)\n• Nginx Proxy Manager (192.168.1.236)\n\n✓ All backups verified\n✓ Retention policy applied (2 weeks)",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-success-notification",
+      "name": "Telegram - Success",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        340
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "2",
+          "name": "Telegram Bot"
+        }
+      },
+      "notes": "Send success notification only when backup succeeds"
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "={{ $vars.TELEGRAM_CHAT_ID }}",
+        "text": "=⚠️ *Media Stack Backup - FAILED*\n\n📅 Date: {{ $json.timestamp.split('T')[0] }}\n❌ Exit Code: {{ $json.exitCode }}\n\n*Error Output:*\n```\n{{ $json.fullOutput.split('\\n').slice(-20).join('\\n') }}\n```\n\n⚠️ Please investigate immediately!\n📋 Check logs: /mnt/server/logs/backup_improved.log",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-failure-notification",
+      "name": "Telegram - Failure",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        500
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "2",
+          "name": "Telegram Bot"
+        }
+      },
+      "notes": "Send failure notification only when backup fails"
+    }
+  ],
+  "connections": {
+    "Every 3 Days Backup Schedule": {
+      "main": [
+        [
+          {
+            "node": "Execute Backup Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Backup Script": {
+      "main": [
+        [
+          {
+            "node": "Parse Backup Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Backup Output": {
+      "main": [
+        [
+          {
+            "node": "Uptime Kuma Push",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Backup Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Backup Status": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Uptime Kuma Push": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2025-12-24T00:00:00.000Z",
+      "updatedAt": "2025-12-24T00:00:00.000Z",
+      "id": "backup-automation",
+      "name": "backup"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-12-24T00:00:00.000Z",
+  "versionId": "2"
+}
